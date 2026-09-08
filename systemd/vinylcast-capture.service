@@ -1,0 +1,27 @@
+[Unit]
+Description=vinylcast — capture USB line-in into OwnTone's pipe
+# Start after OwnTone so the library/pipe consumer is up; not a hard requirement.
+After=owntone.service network-online.target sound.target
+Wants=owntone.service
+
+[Service]
+# --- EDIT THESE to match your `arecord -l` output ---
+Environment=CARD=hw:1,0
+Environment=PIPE=/srv/vinylcast/vinyl
+# Set GATE=1 (and install sox) to only pass audio while the record plays; pair with
+# OwnTone pipe_autostart = true. Leave 0 for continuous + manual play in the UI.
+Environment=GATE=0
+
+# Run as the owntone user so the FIFO is owned correctly and OwnTone can read it.
+User=owntone
+Group=owntone
+
+ExecStart=/usr/local/bin/vinylcast-capture
+
+# arecord exits with EPIPE when OwnTone closes the read end (e.g. you press Stop).
+# Just restart and re-open the pipe; it blocks harmlessly until the next play.
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

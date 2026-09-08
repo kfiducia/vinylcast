@@ -1,0 +1,30 @@
+# vinylcast — OwnTone config additions.
+#
+# MERGE these into the existing blocks in /etc/owntone.conf. Do NOT paste this as a
+# whole second `library { }` block — put the two settings inside the library block
+# that's already in the file. After editing: `sudo systemctl restart owntone`.
+#
+# Full reference: https://owntone.github.io/owntone-server/
+
+library {
+    # The folder that holds our named pipe (created by the capture service).
+    # OwnTone auto-detects a FIFO here and exposes it as a playable "track".
+    directories = { "/srv/vinylcast" }
+
+    # false (recommended): OwnTone reads the pipe only when you press Play in the UI.
+    #   - lets you choose which AirPlay zones each session
+    #   - won't stream turntable hiss 24/7 when the platter is stopped
+    #   - use with the capture service's default GATE=0 (continuous arecord)
+    #
+    # true: OwnTone starts playing (to your last-selected outputs) as soon as audio
+    #   flows in the pipe. Only sane with the capture service's GATE=1 (silence-gated
+    #   via sox), otherwise it plays forever. See docs/SETUP.md §7.
+    pipe_autostart = false
+}
+
+# Notes:
+# - OwnTone's pipe input expects PCM16 / 44100 Hz / stereo (signed 16-bit LE). The
+#   capture script's `arecord -f cd` produces exactly that.
+# - Optionally, a matching "<pipe>.metadata" FIFO can carry Shairport-style metadata;
+#   not needed for a raw line-in source.
+# - Web UI / control on port 3689; AirPlay outputs are discovered via mDNS.

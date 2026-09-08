@@ -1,0 +1,11 @@
+.DS_Store
+*.wav
+*.raw
+/srv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local operator/agent notes (Pi host, SSH, credentials) — not for the public repo
+AGENTS.md

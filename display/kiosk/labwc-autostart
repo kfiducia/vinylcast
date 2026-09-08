@@ -1,0 +1,10 @@
+# vinylcast — labwc autostart. Install to ~/.config/labwc/autostart on the Pi.
+# The first four lines are Raspberry Pi OS's defaults (keep the desktop working);
+# the last two add the kiosk and the screen manager, each via `lwrespawn` so they
+# auto-relaunch if they exit.
+/usr/bin/lwrespawn /usr/bin/pcmanfm-pi &
+/usr/bin/lwrespawn /usr/bin/wf-panel-pi &
+/usr/bin/kanshi &
+/usr/bin/lxsession-xdg-autostart
+/usr/bin/lwrespawn /home/vinylcast/kiosk.sh &
+/usr/bin/lwrespawn python3 /home/vinylcast/display/kiosk/screen-manager.py &

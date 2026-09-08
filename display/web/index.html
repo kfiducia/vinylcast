@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=1024, height=600, initial-scale=1, user-scalable=no" />
+  <title>vinylcast</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- NOW-PLAYING view (default) -->
+  <main id="nowplaying" class="view">
+    <button id="chip" class="chip" title="Choose speakers">
+      <span class="chip-dot"></span>
+      <span id="chip-zones">No speakers selected</span>
+      <span class="chip-gear">⚙</span>
+    </button>
+
+    <div class="np-body">
+      <div class="art-wrap">
+        <img id="art" class="art" alt="" />
+        <div id="art-fallback" class="art fallback">vinyl</div>
+      </div>
+      <div class="meta">
+        <div id="np-title" class="title">Listening…</div>
+        <div id="np-artist" class="artist"></div>
+        <div id="np-album" class="album"></div>
+        <div id="np-status" class="status"></div>
+
+        <!-- Side timer: elapsed vs a typical LP side; warns when to flip. Tap to change side length. -->
+        <div id="side-timer" class="side-timer" title="Tap to change side length">
+          <div class="st-head">
+            <span id="st-elapsed" class="st-elapsed">0:00</span>
+            <span id="st-flip" class="st-flip"></span>
+          </div>
+          <div class="st-bar"><div id="st-fill" class="st-fill"></div></div>
+          <div id="st-sub" class="st-sub"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- PICKER view -->
+  <section id="picker" class="view hidden">
+    <header class="picker-head">
+      <h1>Stream to…</h1>
+      <button id="done" class="done">Done</button>
+    </header>
+    <div id="zones" class="zones"><!-- output tiles injected here --></div>
+    <p id="zones-empty" class="empty hidden">
+      No AirPlay speakers found yet. They must be on the same network as this Pi.
+    </p>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>

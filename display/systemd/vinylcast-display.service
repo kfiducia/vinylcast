@@ -1,0 +1,18 @@
+[Unit]
+Description=vinylcast display backend (kiosk API + shairport metadata reader)
+After=network-online.target owntone.service shairport-sync.service
+Wants=network-online.target owntone.service
+
+[Service]
+User=vinylcast
+Group=vinylcast
+WorkingDirectory=/home/vinylcast/display
+Environment=SHAIRPORT_META=/home/vinylcast/shairport-metadata
+Environment=OWNTONE_HTTP=http://localhost:3689
+Environment=PORT=8080
+ExecStart=/usr/bin/python3 /home/vinylcast/display/server/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

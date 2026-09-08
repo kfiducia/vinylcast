@@ -1,0 +1,2 @@
+# vinylcast display backend (phase 2a)
+aiohttp>=3.9,<4
