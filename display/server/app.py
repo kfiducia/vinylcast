@@ -93,7 +93,10 @@ def itunes_art_lookup(app: dict, key: tuple) -> None:
     Runs in its own thread; only applies if the track hasn't changed and the source
     (PICT) hasn't already supplied art."""
     title, artist, album = key
-    for term, entity in ((f"{artist} {album}", "album"), (f"{artist} {title}", "song")):
+    # Song entity first: it returns the track's OWN album art, which is more accurate than
+    # an album-name search (ACR sometimes reports a single/compilation name that matches the
+    # wrong release — e.g. a track's art coming back as a different album's cover).
+    for term, entity in ((f"{artist} {title}", "song"), (f"{artist} {album}", "album")):
         term = term.strip()
         if not term:
             continue
