@@ -10,6 +10,9 @@ WorkingDirectory=/home/vinylcast/display
 Environment=SHAIRPORT_META=/home/vinylcast/shairport-metadata
 Environment=OWNTONE_HTTP=http://localhost:3689
 Environment=PORT=8080
+# Vinyl ACR (ACRCloud) secrets — NOT in the repo. Optional ('-'): boots without it.
+# See display/systemd/vinylcast.env.example for the keys this file must define.
+EnvironmentFile=-/etc/vinylcast/vinylcast.env
 ExecStart=/usr/bin/python3 /home/vinylcast/display/server/app.py
 Restart=always
 RestartSec=3

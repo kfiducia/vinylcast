@@ -20,11 +20,14 @@ Env:
 """
 import asyncio
 import base64
+import hashlib
+import hmac
 import json as _json
 import logging
 import os
 import re
 import select
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -35,6 +38,15 @@ from aiohttp import ClientSession, web
 OWNTONE_HTTP = os.environ.get("OWNTONE_HTTP", "http://localhost:3689").rstrip("/")
 SHAIRPORT_META = os.environ.get("SHAIRPORT_META", "/home/vinylcast/shairport-metadata")
 PORT = int(os.environ.get("PORT", "8080"))
+
+# --- Vinyl ACR (audio recognition via ACRCloud) — feeds the same now_playing slot ---
+ACR_HOST = os.environ.get("ACRCLOUD_HOST", "").strip()              # identify-xxx.acrcloud.com
+ACR_KEY = os.environ.get("ACRCLOUD_ACCESS_KEY", "").strip()
+ACR_SECRET = os.environ.get("ACRCLOUD_ACCESS_SECRET", "").strip()
+ACR_ENABLED = bool(ACR_HOST and ACR_KEY and ACR_SECRET)             # all three → recognizer on
+VINYL_ADC = os.environ.get("VINYL_ADC", "vinyl_snoop_mono")         # ALSA device to sample (mono)
+VINYL_SAMPLE_SECS = int(os.environ.get("VINYL_SAMPLE_SECS", "10"))   # clip length per try
+VINYL_RECHECK_SECS = int(os.environ.get("VINYL_RECHECK_SECS", "90")) # re-ID cadence
 WEB_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "web"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -206,6 +218,149 @@ def _handle(app: dict, typ: str, code: str, data: bytes, pending: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Vinyl ACR recognizer (runs in a background thread when ACRCloud creds are set)
+# --------------------------------------------------------------------------- #
+# Vinyl carries no metadata, so we listen to the line-in, fingerprint a short clip
+# via ACRCloud, and feed the result into the SAME now_playing slot AirPlay uses.
+# The clip is read from the shared dsnoop device (VINYL_ADC) so it coexists with
+# the arecord that feeds OwnTone. Art comes from the existing iTunes lookup.
+def _vinyl_capture_clip(secs: int) -> bytes:
+    """Grab `secs` of line-in audio as mono WAV bytes via arecord (blocking, in a thread).
+
+    Mono keeps the sample well under ACRCloud's ~1MB request limit (10s mono @44.1k
+    ≈ 880KB) while preserving enough fidelity to fingerprint.
+    """
+    try:
+        p = subprocess.run(
+            ["arecord", "-D", VINYL_ADC, "-f", "S16_LE", "-c", "1", "-r", "44100",
+             "-d", str(secs), "-t", "wav", "-q", "/dev/stdout"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=secs + 12)
+        if p.returncode != 0:
+            log.warning("vinyl: arecord failed: %s", p.stderr.decode("utf-8", "replace")[:200])
+            return b""
+        return p.stdout
+    except Exception as e:  # noqa: BLE001
+        log.warning("vinyl: capture error: %s", e)
+        return b""
+
+
+def _acrcloud_identify(sample: bytes) -> dict | None:
+    """Identify a clip via ACRCloud's signed /v1/identify API.
+
+    Returns {'title','artist','album'} on a match, None on no-match or error.
+    Auth is an HMAC-SHA1 signature over a fixed string-to-sign (method, uri, key,
+    data_type, sig_version, timestamp), base64-encoded — per ACRCloud's spec.
+    """
+    http_uri = "/v1/identify"
+    ts = str(int(time.time()))
+    string_to_sign = "\n".join(["POST", http_uri, ACR_KEY, "audio", "1", ts])
+    signature = base64.b64encode(
+        hmac.new(ACR_SECRET.encode(), string_to_sign.encode(), hashlib.sha1).digest()
+    ).decode()
+
+    boundary = "----vinylcast%d" % os.getpid()
+    fields = {
+        "access_key": ACR_KEY,
+        "data_type": "audio",
+        "signature_version": "1",
+        "signature": signature,
+        "sample_bytes": str(len(sample)),
+        "timestamp": ts,
+    }
+    body = b""
+    for k, v in fields.items():
+        body += ("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"
+                 % (boundary, k, v)).encode()
+    body += ("--%s\r\nContent-Disposition: form-data; name=\"sample\"; filename=\"clip.wav\"\r\n"
+             "Content-Type: audio/wav\r\n\r\n" % boundary).encode() + sample + b"\r\n"
+    body += ("--%s--\r\n" % boundary).encode()
+    req = urllib.request.Request(
+        "https://%s%s" % (ACR_HOST, http_uri), data=body,
+        headers={"Content-Type": "multipart/form-data; boundary=%s" % boundary})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            j = _json.loads(r.read())
+    except Exception as e:  # noqa: BLE001
+        log.warning("vinyl: ACRCloud request error: %s", e)
+        return None
+    code = (j.get("status") or {}).get("code")
+    if code == 1001:
+        return None                                             # no result — normal miss
+    if code != 0:
+        log.warning("vinyl: ACRCloud status: %s", j.get("status"))
+        return None
+    music = ((j.get("metadata") or {}).get("music") or [])
+    if not music:
+        return None
+    m = music[0]
+    artists = ", ".join(a.get("name", "") for a in (m.get("artists") or []) if a.get("name"))
+    return {
+        "title": m.get("title"),
+        "artist": artists or None,
+        "album": (m.get("album") or {}).get("name"),
+    }
+
+
+def _apply_vinyl_track(app: dict, res: dict) -> None:
+    """Commit a recognized vinyl track into now_playing, mirroring the AirPlay path."""
+    key = (res.get("title"), res.get("artist"), res.get("album"))
+    if key != app.get("track_key"):
+        app["track_key"] = key
+        app["artwork"] = None                                   # never show stale art
+        app["art_version"] = app.get("art_version", 0) + 1
+        threading.Thread(target=itunes_art_lookup, args=(app, key), daemon=True).start()
+    app["nowplaying"] = {
+        "title": res.get("title"),
+        "artist": res.get("artist"),
+        "album": res.get("album"),
+        "artwork_url": f"/artwork/current?v={app.get('art_version', 0)}",
+        "source": "vinyl",
+    }
+
+
+def vinyl_recognizer(app: dict) -> None:
+    """Identify the record on the line-in and feed now_playing (source=vinyl).
+
+    Only acts while OwnTone is playing and AirPlay is NOT the active source — AirPlay
+    owns the screen when it's streaming. Recognizes on first play, then every
+    VINYL_RECHECK_SECS so a long side updates as tracks change. A no-match leaves the
+    previous state ('Listening…' or the last good track) rather than blanking.
+    """
+    log.info("vinyl: recognizer started (device=%s, sample=%ds, recheck=%ds)",
+             VINYL_ADC, VINYL_SAMPLE_SECS, VINYL_RECHECK_SECS)
+    last_recog = 0.0
+    while not app.get("shutdown"):
+        time.sleep(2.0)
+        np = app.get("nowplaying")
+        if np and np.get("source") == "airplay":
+            continue                                            # AirPlay owns the screen
+        playing = (app.get("last_player") or {}).get("state") == "play"
+        if not playing:
+            if np and np.get("source") == "vinyl":              # vinyl stopped → clear
+                app["nowplaying"] = None
+                app["artwork"] = None
+                app["track_key"] = None
+                last_recog = 0.0
+            continue
+        now = time.monotonic()
+        have_vinyl = bool(np and np.get("source") == "vinyl")
+        if have_vinyl and (now - last_recog) < VINYL_RECHECK_SECS:
+            continue                                            # not due for a re-check yet
+        last_recog = now
+        wav = _vinyl_capture_clip(VINYL_SAMPLE_SECS)
+        if not wav:
+            continue
+        if (app.get("nowplaying") or {}).get("source") == "airplay":
+            continue                                            # AirPlay took over mid-clip
+        res = _acrcloud_identify(wav)
+        if res:
+            _apply_vinyl_track(app, res)
+            log.info("vinyl: identified %s — %s", res.get("artist"), res.get("title"))
+        else:
+            log.info("vinyl: no match this cycle")
+
+
+# --------------------------------------------------------------------------- #
 # OwnTone (audio router) — outputs + player state
 # --------------------------------------------------------------------------- #
 async def ot_get(session: ClientSession, path: str):
@@ -324,6 +479,11 @@ async def on_startup(app: web.Application) -> None:
     app["last_player"] = None      # last OwnTone player snapshot (drives /state screen-wake)
     app["meta_thread"] = threading.Thread(target=metadata_reader, args=(app,), daemon=True)
     app["meta_thread"].start()
+    if ACR_ENABLED:
+        app["vinyl_thread"] = threading.Thread(target=vinyl_recognizer, args=(app,), daemon=True)
+        app["vinyl_thread"].start()
+    else:
+        log.info("vinyl: ACRCloud creds not set (need host+key+secret) — recognizer disabled")
     app["broadcaster"] = asyncio.create_task(periodic_broadcast(app))
 
 
