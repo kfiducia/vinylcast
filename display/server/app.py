@@ -224,6 +224,7 @@ async def build_snapshot(app: web.Application) -> dict:
         pass
     try:
         snap["player"] = await ot_get(session, "/api/player")
+        app["last_player"] = snap["player"]   # cache for the lightweight /state poll
     except Exception:  # noqa: BLE001
         pass
     return snap
@@ -295,8 +296,17 @@ async def artwork_current(request: web.Request) -> web.Response:
 
 
 async def state(request: web.Request) -> web.Response:
-    """Lightweight status for the screen-manager: is anything playing right now?"""
-    return web.json_response({"playing": request.app.get("nowplaying") is not None})
+    """Lightweight status for the screen-manager: is anything playing right now?
+
+    True when we have now-playing metadata OR OwnTone is actively playing audio.
+    The second clause is what keeps the panel awake for vinyl/line-in, which has
+    no metadata yet — otherwise the screen blanks mid-record.
+    """
+    app = request.app
+    playing = app.get("nowplaying") is not None
+    if (app.get("last_player") or {}).get("state") == "play":
+        playing = True
+    return web.json_response({"playing": playing})
 
 
 async def index(request: web.Request) -> web.Response:
@@ -311,6 +321,7 @@ async def on_startup(app: web.Application) -> None:
     app["artwork"] = None
     app["art_version"] = 0
     app["track_key"] = None
+    app["last_player"] = None      # last OwnTone player snapshot (drives /state screen-wake)
     app["meta_thread"] = threading.Thread(target=metadata_reader, args=(app,), daemon=True)
     app["meta_thread"].start()
     app["broadcaster"] = asyncio.create_task(periodic_broadcast(app))
