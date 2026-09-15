@@ -1,0 +1,17 @@
+[Unit]
+Description=vinylcast line-in capture controller (feeds OwnTone pipe on audio presence)
+After=network-online.target owntone.service sound.target
+Wants=network-online.target owntone.service
+
+[Service]
+User=vinylcast
+Group=vinylcast
+WorkingDirectory=/home/vinylcast/display
+Environment=OWNTONE_HTTP=http://localhost:3689
+EnvironmentFile=-/etc/vinylcast/vinylcast.env
+ExecStart=/usr/bin/python3 /home/vinylcast/display/capture/vinyl-capture.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

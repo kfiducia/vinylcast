@@ -74,7 +74,12 @@ html, body {
 .done { background: var(--accent); color: #06210f; border: none; border-radius: 999px;
         font-size: 22px; font-weight: 700; padding: 12px 34px; }
 .zones { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px;
-         padding: 14px 40px 40px; height: calc(600px - 92px); overflow: auto; }
+         padding: 14px 40px 40px; height: calc(600px - 92px); overflow: auto;
+         /* drag-to-scroll surface for the touch panel (see enableDragScroll) */
+         touch-action: none; overscroll-behavior: contain; cursor: grab;
+         user-select: none; -webkit-user-select: none; scrollbar-width: none; }
+.zones.dragging { cursor: grabbing; }
+.zones::-webkit-scrollbar { width: 0; height: 0; }
 .zone {
   background: var(--panel); border: 2px solid transparent; border-radius: var(--radius);
   padding: 18px 20px; display: flex; flex-direction: column; justify-content: space-between;
