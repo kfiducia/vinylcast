@@ -188,6 +188,48 @@ function showView(which) {
   $("picker").classList.toggle("hidden", which !== "picker");
 }
 
+// ------------------------------------------------------------ Drag-to-scroll ---
+// The 7" panel's USB touch controller reports taps but no kinetic touch-scroll, so
+// the thin scrollbar is fiddly with a finger. Turn the whole speaker list into a
+// drag surface: press anywhere and drag to pan. A small movement threshold keeps
+// real taps working (toggle a tile), and presses that start on a volume slider are
+// left to the slider.
+function enableDragScroll(el) {
+  let down = false, moved = false, startY = 0, startTop = 0, pid = null;
+  const THRESH = 8; // px of travel before a press becomes a drag (taps stay taps)
+
+  el.addEventListener("pointerdown", (e) => {
+    if (e.target.closest(".vol")) return;      // let the volume sliders drag themselves
+    down = true; moved = false;
+    startY = e.clientY; startTop = el.scrollTop; pid = e.pointerId;
+  });
+
+  el.addEventListener("pointermove", (e) => {
+    if (!down) return;
+    const dy = e.clientY - startY;
+    if (!moved && Math.abs(dy) < THRESH) return;
+    if (!moved) { moved = true; el.classList.add("dragging"); el.setPointerCapture(pid); }
+    el.scrollTop = startTop - dy;
+    e.preventDefault();
+  });
+
+  const end = () => {
+    if (!down) return;
+    down = false;
+    if (moved) {
+      el.classList.remove("dragging");
+      try { el.releasePointerCapture(pid); } catch (e) { /* pointer already gone */ }
+      // Swallow the click the browser fires after a drag so it doesn't toggle a tile.
+      // Self-remove shortly after in case no click follows (touch devices vary).
+      const kill = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+      el.addEventListener("click", kill, { capture: true });
+      setTimeout(() => el.removeEventListener("click", kill, { capture: true }), 350);
+    }
+  };
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+}
+
 // ---------------------------------------------------------------------- Init ---
 $("chip").onclick = () => showView("picker");
 $("done").onclick = () => showView("nowplaying");
@@ -199,6 +241,7 @@ $("side-timer").onclick = () => {
   SIDE_SECONDS = opts[(i + 1) % opts.length] * 60;
   tickTimer();
 };
+enableDragScroll($("zones"));
 showView("nowplaying");
 render();
 setInterval(tickTimer, 1000);
