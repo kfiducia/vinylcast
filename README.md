@@ -88,7 +88,8 @@ by audio fingerprinting (ACR). When nothing's playing the panel shows a quiet
 - **[docs/SCREEN-UI.md](docs/SCREEN-UI.md)** — *(phase 2)* touchscreen kiosk: pick
   which AirPlay zones to stream to, then show album art + now-playing.
 - **[docs/NOW-PLAYING-ACR.md](docs/NOW-PLAYING-ACR.md)** — *(phase 2)* how to
-  identify a vinyl track with no metadata (audio fingerprinting: AudD/ACRCloud).
+  identify a vinyl track with no metadata (audio fingerprinting: ACRCloud, or the
+  free AcoustID + MusicBrainz provider).
 
 ## The one thing to set your expectations on: latency
 
