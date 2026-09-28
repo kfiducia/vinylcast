@@ -351,7 +351,7 @@ def _acoustid_identify(sample: bytes) -> dict | None:
     duration, fingerprint = fpd
     body = urllib.parse.urlencode({
         "client": ACOUSTID_KEY,
-        "meta": "recordings+releasegroups",
+        "meta": "recordings releasegroups",       # space-separated; urlencode → '+', which AcoustID reads as the separator (a literal '+' would be sent %2B and ignored)
         "duration": str(duration),
         "fingerprint": fingerprint,
     }).encode()                                   # POST form: fingerprints are too long for a GET URL
