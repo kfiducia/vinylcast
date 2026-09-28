@@ -8,8 +8,9 @@ The kiosk's data source. Two concerns, deliberately separate:
   * now-playing metadata (artist/track/album + cover art) — read DIRECTLY from
     the metadata source, NOT through OwnTone (OwnTone's pipe-metadata reader
     only grabs it once and drops cover art). For AirPlay-in that source is
-    shairport-sync's metadata pipe, parsed here. For vinyl later, the ACR
-    recognizer feeds this same `now_playing` slot — the UI never changes.
+    shairport-sync's metadata pipe, parsed here. For vinyl later, the selected
+    recognizer (ACRCloud or AcoustID, per `VINYL_ACR_PROVIDER`) feeds this same
+    `now_playing` slot — the UI never changes.
 
 The frontend gets a periodic snapshot over /ws: {outputs, player, now_playing}.
 
@@ -27,6 +28,7 @@ import logging
 import os
 import re
 import select
+import shutil
 import subprocess
 import threading
 import time
@@ -39,11 +41,19 @@ OWNTONE_HTTP = os.environ.get("OWNTONE_HTTP", "http://localhost:3689").rstrip("/
 SHAIRPORT_META = os.environ.get("SHAIRPORT_META", "/home/vinylcast/shairport-metadata")
 PORT = int(os.environ.get("PORT", "8080"))
 
-# --- Vinyl ACR (audio recognition via ACRCloud) — feeds the same now_playing slot ---
+# --- Vinyl ACR (audio recognition, selected recognizer: ACRCloud or AcoustID per
+# VINYL_ACR_PROVIDER) — feeds the same now_playing slot ---
 ACR_HOST = os.environ.get("ACRCLOUD_HOST", "").strip()              # identify-xxx.acrcloud.com
 ACR_KEY = os.environ.get("ACRCLOUD_ACCESS_KEY", "").strip()
 ACR_SECRET = os.environ.get("ACRCLOUD_ACCESS_SECRET", "").strip()
-ACR_ENABLED = bool(ACR_HOST and ACR_KEY and ACR_SECRET)             # all three → recognizer on
+ACR_ENABLED = bool(ACR_HOST and ACR_KEY and ACR_SECRET)             # all three → ACRCloud ready
+VINYL_ACR_PROVIDER = os.environ.get("VINYL_ACR_PROVIDER", "acrcloud").strip().lower()
+ACOUSTID_KEY = os.environ.get("ACOUSTID_CLIENT_KEY", "").strip()   # free app key, no billing
+ACOUSTID_MIN_SCORE = float(os.environ.get("VINYL_ACOUSTID_MIN_SCORE", "0.5"))  # reject weak matches
+if VINYL_ACR_PROVIDER == "acoustid":
+    VINYL_ENABLED = bool(ACOUSTID_KEY) and bool(shutil.which("fpcalc"))
+else:                                     # "acrcloud" (default) or any unknown value → safe default
+    VINYL_ENABLED = ACR_ENABLED
 VINYL_ADC = os.environ.get("VINYL_ADC", "vinyl_snoop_mono")         # ALSA device to sample (mono)
 VINYL_SAMPLE_SECS = int(os.environ.get("VINYL_SAMPLE_SECS", "10"))   # clip length per try
 VINYL_RECHECK_SECS = int(os.environ.get("VINYL_RECHECK_SECS", "90")) # re-ID cadence
@@ -221,12 +231,14 @@ def _handle(app: dict, typ: str, code: str, data: bytes, pending: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Vinyl ACR recognizer (runs in a background thread when ACRCloud creds are set)
+# Vinyl ACR recognizer (runs in a background thread when the selected recognizer
+# — ACRCloud or AcoustID, per VINYL_ACR_PROVIDER — is ready)
 # --------------------------------------------------------------------------- #
 # Vinyl carries no metadata, so we listen to the line-in, fingerprint a short clip
-# via ACRCloud, and feed the result into the SAME now_playing slot AirPlay uses.
-# The clip is read from the shared dsnoop device (VINYL_ADC) so it coexists with
-# the arecord that feeds OwnTone. Art comes from the existing iTunes lookup.
+# via the selected recognizer (ACRCloud or AcoustID), and feed the result into the
+# SAME now_playing slot AirPlay uses. The clip is read from the shared dsnoop device
+# (VINYL_ADC) so it coexists with the arecord that feeds OwnTone. Art comes from the
+# existing iTunes lookup.
 def _vinyl_capture_clip(secs: int) -> bytes:
     """Grab `secs` of line-in audio as mono WAV bytes via arecord (blocking, in a thread).
 
@@ -304,6 +316,77 @@ def _acrcloud_identify(sample: bytes) -> dict | None:
     }
 
 
+def _acoustid_fingerprint(sample: bytes) -> tuple[int, str] | None:
+    """Compute (duration_secs, fingerprint) from WAV bytes via Chromaprint's fpcalc.
+    fpcalc reads a file, so we spool the clip to a temp WAV. None on any failure."""
+    import tempfile
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav") as tf:
+            tf.write(sample); tf.flush()
+            p = subprocess.run(["fpcalc", "-json", tf.name],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        if p.returncode != 0:
+            log.warning("vinyl: fpcalc failed: %s", p.stderr.decode("utf-8", "replace")[:200])
+            return None
+        j = _json.loads(p.stdout)
+        fp = j.get("fingerprint")
+        dur = int(round(float(j.get("duration") or 0)))
+        if not fp or dur <= 0:
+            return None
+        return dur, fp
+    except Exception as e:  # noqa: BLE001
+        log.warning("vinyl: fpcalc error: %s", e)
+        return None
+
+
+def _acoustid_identify(sample: bytes) -> dict | None:
+    """Identify a clip via AcoustID (fingerprint) → MusicBrainz metadata.
+    Returns {'title','artist','album'} on a confident match, None otherwise.
+    Vinyl caveat: free fingerprinting is tuned to clean digital masters and misses more
+    on a turntable feed (RIAA curve, speed drift, surface noise); ACOUSTID_MIN_SCORE
+    drops low-confidence hits so we show 'Listening…' rather than a wrong track."""
+    fpd = _acoustid_fingerprint(sample)
+    if not fpd:
+        return None
+    duration, fingerprint = fpd
+    body = urllib.parse.urlencode({
+        "client": ACOUSTID_KEY,
+        "meta": "recordings+releasegroups",
+        "duration": str(duration),
+        "fingerprint": fingerprint,
+    }).encode()                                   # POST form: fingerprints are too long for a GET URL
+    req = urllib.request.Request(
+        "https://api.acoustid.org/v2/lookup", data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded",
+                 "User-Agent": "vinylcast/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            j = _json.loads(r.read())
+    except Exception as e:  # noqa: BLE001
+        log.warning("vinyl: AcoustID request error: %s", e)
+        return None
+    if j.get("status") != "ok":
+        log.warning("vinyl: AcoustID status: %s", j.get("error") or j.get("status"))
+        return None
+    results = j.get("results") or []
+    if not results:
+        return None
+    top = results[0]                              # AcoustID returns results sorted by score desc
+    if (top.get("score") or 0) < ACOUSTID_MIN_SCORE:
+        return None                               # match too weak — treat as no-match
+    recs = top.get("recordings") or []
+    if not recs or not recs[0].get("title"):
+        return None                               # fingerprint known but no usable metadata
+    m = recs[0]
+    artists = ", ".join(a.get("name", "") for a in (m.get("artists") or []) if a.get("name"))
+    rgs = m.get("releasegroups") or []
+    return {
+        "title": m.get("title"),
+        "artist": artists or None,
+        "album": (rgs[0].get("title") if rgs else None),
+    }
+
+
 def _apply_vinyl_track(app: dict, res: dict) -> None:
     """Commit a recognized vinyl track into now_playing, mirroring the AirPlay path."""
     key = (res.get("title"), res.get("artist"), res.get("album"))
@@ -329,8 +412,8 @@ def vinyl_recognizer(app: dict) -> None:
     VINYL_RECHECK_SECS so a long side updates as tracks change. A no-match leaves the
     previous state ('Listening…' or the last good track) rather than blanking.
     """
-    log.info("vinyl: recognizer started (device=%s, sample=%ds, recheck=%ds)",
-             VINYL_ADC, VINYL_SAMPLE_SECS, VINYL_RECHECK_SECS)
+    log.info("vinyl: recognizer started (provider=%s, device=%s, sample=%ds, recheck=%ds)",
+             VINYL_ACR_PROVIDER, VINYL_ADC, VINYL_SAMPLE_SECS, VINYL_RECHECK_SECS)
     last_recog = 0.0
     while not app.get("shutdown"):
         time.sleep(2.0)
@@ -355,7 +438,7 @@ def vinyl_recognizer(app: dict) -> None:
             continue
         if (app.get("nowplaying") or {}).get("source") == "airplay":
             continue                                            # AirPlay took over mid-clip
-        res = _acrcloud_identify(wav)
+        res = _acoustid_identify(wav) if VINYL_ACR_PROVIDER == "acoustid" else _acrcloud_identify(wav)
         if res:
             _apply_vinyl_track(app, res)
             log.info("vinyl: identified %s — %s", res.get("artist"), res.get("title"))
@@ -482,11 +565,14 @@ async def on_startup(app: web.Application) -> None:
     app["last_player"] = None      # last OwnTone player snapshot (drives /state screen-wake)
     app["meta_thread"] = threading.Thread(target=metadata_reader, args=(app,), daemon=True)
     app["meta_thread"].start()
-    if ACR_ENABLED:
+    if VINYL_ENABLED:
         app["vinyl_thread"] = threading.Thread(target=vinyl_recognizer, args=(app,), daemon=True)
         app["vinyl_thread"].start()
     else:
-        log.info("vinyl: ACRCloud creds not set (need host+key+secret) — recognizer disabled")
+        log.info("vinyl: recognizer disabled (provider=%s) — need %s",
+                 VINYL_ACR_PROVIDER,
+                 "ACOUSTID_CLIENT_KEY + fpcalc on PATH" if VINYL_ACR_PROVIDER == "acoustid"
+                 else "ACRCloud host+key+secret")
     app["broadcaster"] = asyncio.create_task(periodic_broadcast(app))
 
 

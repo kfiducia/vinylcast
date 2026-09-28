@@ -50,6 +50,10 @@ sudo alsactl store # persist mixer settings across reboots
 ```sh
 sudo apt install -y owntone alsa-utils
 ```
+> Only if you'll use the **AcoustID** now-playing provider (`VINYL_ACR_PROVIDER=acoustid`),
+> also install `libchromaprint-tools` — it provides the `fpcalc` fingerprinter the
+> recognizer needs. See [NOW-PLAYING-ACR.md](NOW-PLAYING-ACR.md#acoustid-free-provider).
+
 OwnTone ships as a systemd service and a web UI on port **3689**. Confirm it's up:
 ```sh
 systemctl status owntone
